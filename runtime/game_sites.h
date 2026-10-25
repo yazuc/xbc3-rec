@@ -2,6 +2,7 @@
 // tools/game_sites.py finds them for the version the game code was generated from, and the game library carries them
 // (runtime/gamelib.h, the generated layout.c). g_site holds them once the library is loaded (gamelib_load).
 #pragma once
+#include <stdbool.h>
 #include <stdint.h>
 
 // name (as in tools/game_sites.py) and what is there
@@ -34,6 +35,10 @@ extern "C" {
 extern GameSites g_site;
 // The game version the loaded game code is for ("1.8.2"; "" before gamelib_load).
 extern const char *g_game_version;
+// True when the game code is for a game that isn't Breath of the Wild (tools/game_sites.py Version.generic): it has no
+// sites, g_site is all zero and none of BOTW's hooks (Options screen, frame loop, pause state...) exist. Whatever reads
+// a g_site address has to check for that first.
+extern bool g_game_generic;
 
 #ifdef __cplusplus
 }

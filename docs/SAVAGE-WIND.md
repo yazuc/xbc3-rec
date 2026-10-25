@@ -1241,6 +1241,27 @@ que depende de la versión son las direcciones del `main` que tocan los parches 
   opciones del juego (14). Cada parche además comprueba la palabra de instrucción que espera y para la generación
   si no la ve. El modo FP (`FPCR.FZ` en `MXCSR`, `runtime/simd.h`) no tiene direcciones.
 
+Juegos que no son BOTW (versión `generic`): Xenoblade Chronicles 3 1.0.0 (title id `010074F013262000`) se acepta sin
+sitios. Sin probar con archivos reales.
+- `VERSIONS` y `game_versions.h` llevan ahora además el title id y la marca `generic`
+  (`X(versión, build id, soportada, ficheros de romfs, title id, generic)`). Una versión con el build id vacío se
+  reconoce solo por el program id del `main.npdm` (`tools/nso.py program_id`, igual que `boot()` en `runtime/main.c`;
+  en el lanzador `npdm_title_id`): cualquier `main` de ese juego. Un build id exacto gana siempre sobre un title id.
+  Para fijar el build id de XC3: `sw_probe.py` lo imprime; ponerlo en las dos listas (y el test comprueba que
+  coincidan).
+- `generic`: `for_module` devuelve `(nombre, {})` sin resolver patrones, `gen.py` no aplica `patches.py` y `layout.c`
+  queda con la versión y 0 sitios. `gamelib.c` lo toma como juego genérico (`g_game_generic`, `g_site` todo en cero);
+  una biblioteca sin sitios y sin nombre de versión (`--no-sites`) se sigue rechazando.
+- Todo lo que lee una dirección de `g_site` lo comprueba: `framepace.c` (menús, eventos, paso del mando, reloj),
+  `services/fs.c` (`Ver.%s`), `nvn/objects.c` (el bucle de frames) y `game_options.mm` (`rt_title_menu_prepare`). Los
+  `rt_opt_*` solo los llaman los parches de BOTW, que en un juego genérico no existen. El menú de superposición
+  (F1 / Esc) queda activo (`menu.mm`, `overlay_enabled`): no hay pantalla de Opciones del juego donde llegar a los
+  ajustes.
+- El lanzador no pide `System/Version.txt` y no cuenta ficheros si `romfs_files` es 0 (`check_romfs`).
+- Lo que sigue siendo de BOTW y no se ha revisado para otro juego: los idiomas (`language.c`, `Pack/Bootup_*.pack`,
+  `Voice/`), el RSTB de `services/fs.c` (se ignora si el archivo no existe), el escaneo de shaders de
+  `nvn/shader_archive.c` y los HLE de `runtime/hle/`.
+
 Pasos para una versión nueva (así se hizo la 1.9.0):
 
 1. Extraer su exefs y romfs (romfs con la actualización fusionada) y correr

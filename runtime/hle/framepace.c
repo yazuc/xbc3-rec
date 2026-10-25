@@ -71,6 +71,7 @@ bool framepace_on(void) {
 // The menus: the game is paused (pause menu, map), or the title screen's menu is up (screen 1 in the UI screen
 // manager [screen_mgr]: +0x28 count, +0x30 screens by id).
 static bool in_menu(void) {
+    if (!PAUSE_STATE || !g_site.screen_mgr) return false;  // (a generic game, g_game_generic: no BOTW menus to tell)
     if (*(uint32_t *)(uintptr_t)PAUSE_STATE) return true;
     uint64_t mgr = *(uint64_t *)(uintptr_t)g_site.screen_mgr;
     return mgr && VF(uint32_t, mgr, 0x28) > 1 && VF(uint64_t, mgr, 0x30) &&
@@ -81,6 +82,7 @@ static bool in_menu(void) {
 // +0x1d2b8, as hasActiveEvent, 1.8.2 0x7000ffa208, reads it; the time of day stands still meanwhile). Some of their
 // waits count frames: the new game's opening gave Link control 2 s early at 60 fps, 3 s at 120.
 static bool in_event(void) {
+    if (!g_site.event_mgr) return false;  // (a generic game: no BOTW event manager)
     uint64_t evt = *(uint64_t *)(uintptr_t)g_site.event_mgr;
     return evt && *(uint64_t *)(uintptr_t)(evt + 0x1d2b8);
 }
@@ -161,7 +163,7 @@ void framepace_presented(uint64_t t, bool on_grid) {
     g_grid_streak = on_grid ? g_grid_streak + 1 : 0;
     static int fixed = -1;
     if (fixed < 0) fixed = env_int("SAVAGEWIND_NO_CONTROLLER_STEP", 0);
-    if (!fixed) *(float *)(uintptr_t)CONTROLLER_STEP = g_step;
+    if (!fixed && CONTROLLER_STEP) *(float *)(uintptr_t)CONTROLLER_STEP = g_step;  // (zero: a generic game)
 }
 
 // The menus' speed: every frame the game sets a GUI speed to its integer interval x 0.5: 1 at 30 fps, 0.5 at 60, and
@@ -194,6 +196,7 @@ void rt_vfr_update(uint64_t vfr) {
     clock_probe(vfr);
     log_screens();
     if (!framepace_on()) return;
+    if (!PAUSE_STATE) return;  // (a generic game, g_game_generic: the BOTW clock isn't there to set)
     static uint64_t last_t;
     static double real, given;  // seconds of real time and of game time handed out (only their gap matters)
     static double smooth;       // seconds between updates, averaged over about 20
@@ -310,6 +313,7 @@ static void clock_probe(uint64_t vfr) {
     if (now < next) return;
     next += (uint64_t)every * 1000000ull;
     if (next < now) next = now + (uint64_t)every * 1000000ull;
+    if (!g_site.world_mgr || !g_site.player_info) return;  // (a generic game: nothing of BOTW's to read)
     float tod = -1, pos[3] = {0, 0, 0}, stamina = -1;
     uint64_t wm = *(uint64_t *)(uintptr_t)g_site.world_mgr;
     if (wm && VF(uint32_t, wm, 0x5c0)) {
@@ -331,7 +335,7 @@ static void log_screens(void) {
     static int on = -1;
     static char last[1024];
     if (on < 0) on = env_int("SAVAGEWIND_LOG_SCREENS", 0);
-    if (!on) return;
+    if (!on || !g_site.screen_mgr || !PAUSE_STATE) return;  // (a generic game: no BOTW screens)
     uint64_t mgr = *(uint64_t *)(uintptr_t)g_site.screen_mgr;
     if (!mgr) return;
     uint32_t n = VF(uint32_t, mgr, 0x28);

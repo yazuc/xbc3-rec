@@ -27,7 +27,7 @@ import game_sites
 import layout
 from gen import Module, discover
 from lifter import Unsupported
-from nso import Nso, header
+from nso import Nso, header, program_id
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(TOOLS)
@@ -163,9 +163,16 @@ def main():
     print(f'  {"CANNOT LOAD: " + "; ".join(why) if why else "loads"}')
     version = None
     if 'main' in bases:  # (tools/game_sites.py VERSIONS)
-        version = game_sites.supported_version(header(os.path.join(args.exefs, 'main'))['build_id'])
+        main_build = header(os.path.join(args.exefs, 'main'))['build_id']
+        tid = program_id(os.path.join(args.exefs, 'main.npdm'))
+        print(f'  main build id {main_build[:16]}  title id {tid or "(no usable main.npdm)"}')
+        version = game_sites.supported_version(main_build, tid)
         print('  game version: ' + (f'{version.name}' + ('' if version.supported else ' (not supported yet)')
+                                    + (' (generic: no BOTW sites)' if version.generic else '')
                                     if version else 'not one Savage Wind knows'))
+        if version and version.generic and not version.build_id:
+            print(f'  build id not pinned: to accept only this build, put "{main_build[:16]}" as the build id of '
+                  f'"{version.name}" in tools/game_sites.py VERSIONS and runtime/game_versions.h')
     other = [f for f in present if f not in bases and f != 'rtld']
     if other:
         print(f'  NOTE: files that are not modules the runtime loads: {other}')

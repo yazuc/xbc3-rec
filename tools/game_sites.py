@@ -40,12 +40,24 @@ from collections import namedtuple
 
 MAIN_BASE = 0x7000000000  # (tools/layout.py: main is the first module)
 
-# name, version, main module build id (the first 8 bytes; tools/sw_probe.py prints it), supported. One that isn't
-# supported yet is known but refused by the setup until its sites are checked.
-Version = namedtuple('Version', 'name build_id supported')
+# name, main module build id (the first 8 bytes; tools/sw_probe.py prints it), supported, title id, generic. One that
+# isn't supported yet is known but refused by the setup until its sites are checked.
+#
+# title id: the program id in exefs/main.npdm (16 lowercase hex digits; tools/nso.py program_id). A version with an
+#   empty build id is told by it alone: any main module of that title matches (its build id isn't pinned yet; paste the
+#   one `sw_probe.py` prints to pin it, and that version then matches that build only). Versions with a build id are
+#   told by it, as before (title id '').
+# generic: the game isn't Breath of the Wild. None of BOTW's sites (SITES below: its Options and title screens, pause
+#   state, frame loop...) exist in it, so the code is generated without sites or patches: the whole game is recompiled
+#   and the SDK is replaced by its HLE as for any game, and nothing of BOTW's is hooked (runtime/gamelib.c: a game
+#   library with a version name and no sites is generic).
+Version = namedtuple('Version', 'name build_id supported title_id generic', defaults=('', False))
 VERSIONS = [
     Version('1.8.2', 'de0b6ac4efc1dda7', True),
     Version('1.9.0', 'cd57b23fa4bbad65', True),  # (2026-02-17: Thai text on Switch 2; SDK 21.4.1)
+    # Xenoblade Chronicles 3 1.0.0 (title id 010074F013262000). The main build id isn't pinned: the files it was
+    # first set up from were not available to read it from.
+    Version('XC3 1.0.0', '', True, '010074f013262000', True),
 ]
 
 Site = namedtuple('Site', 'name kind pattern at')
@@ -217,11 +229,16 @@ class SiteError(Exception):
     pass
 
 
-def supported_version(build_id):
-    """The VERSIONS entry of a main module build id (64 hex digits or the first 16), or None."""
+def supported_version(build_id, title_id=None):
+    """The VERSIONS entry of a main module: by its build id (64 hex digits or the first 16); else, for a version
+    whose build id isn't pinned, by the title id of its main.npdm (16 hex digits, or None: no npdm); else None."""
     for v in VERSIONS:
         if v.build_id and build_id[:16] == v.build_id:
             return v
+    if title_id:
+        for v in VERSIONS:
+            if not v.build_id and v.title_id and title_id.lower() == v.title_id:
+                return v
     return None
 
 
@@ -464,14 +481,23 @@ def resolve(main, known=None, log=None):
     return out
 
 
-def for_module(nso, base, allow_unsupported=False, log=None):
+def for_module(nso, base, allow_unsupported=False, log=None, title_id=None):
     """(version name, sites) for the main module nso at base. Refuses a build that VERSIONS doesn't support, unless
-    allow_unsupported (bringing up a new version: its sites must then all be found by pattern)."""
-    v = supported_version(nso.build_id)
+    allow_unsupported (bringing up a new version: its sites must then all be found by pattern). title_id: the
+    program id of the exefs's main.npdm, which tells a version whose build id isn't pinned. A generic version
+    (another game than BOTW) has no sites: (its name, {})."""
+    v = supported_version(nso.build_id, title_id)
+    if v and v.supported and v.generic:
+        if log:
+            log(f'game_sites: main module build {nso.build_id[:16]}: {v.name}'
+                + ('' if v.build_id else f' (told by title id {v.title_id}; build id not pinned)')
+                + '; no sites, nothing of Breath of the Wild\'s is hooked')
+        return v.name, {}
     if not v or not v.supported:
         what = f'version {v.name}, not supported yet' if v else 'not a version Savage Wind knows'
         if not allow_unsupported:
-            raise SiteError(f'main module build {nso.build_id[:16]}: {what}')
+            raise SiteError(f'main module build {nso.build_id[:16]}: {what}'
+                            + (f' (title id {title_id})' if title_id else ''))
         if log:
             log(f'game_sites: main module build {nso.build_id[:16]}: {what}; sites by pattern only')
     name = v.name if v else nso.build_id[:16]
@@ -481,8 +507,15 @@ def for_module(nso, base, allow_unsupported=False, log=None):
 def main():
     if len(sys.argv) < 3 or sys.argv[1] not in ('find', 'pattern', 'common'):
         sys.exit(__doc__)
-    from nso import Nso
+    import os
+    from nso import Nso, program_id
     m = Main(Nso(sys.argv[2]))
+    tid = program_id(os.path.join(os.path.dirname(os.path.abspath(sys.argv[2])), 'main.npdm'))
+    if sys.argv[1] == 'find':
+        gv = supported_version(m.nso.build_id, tid)
+        if gv and gv.generic:
+            print(f'main module build {m.nso.build_id[:16]}: {gv.name} (title id {tid}): a generic game, it has no sites')
+            return
     if sys.argv[1] == 'common':
         mb, a, b = Main(Nso(sys.argv[4])), int(sys.argv[3], 16), int(sys.argv[5], 16)
         kind = sys.argv[6] if len(sys.argv) > 6 else 'code'

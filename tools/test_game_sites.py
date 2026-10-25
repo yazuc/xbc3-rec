@@ -85,17 +85,22 @@ def image(fn_at, data, got, callee, got_value, filler=0x40):
 def main():
     # ---- the lists agree
     h = open(os.path.join(ROOT, 'runtime', 'game_versions.h'), encoding='utf-8').read()
-    hv = re.findall(r'X\("([^"]*)", "([0-9a-f]*)", ([01]), \d+\)', h)  # (the RomFS file count is the setup's alone)
-    check(hv == [(v.name, v.build_id, str(int(v.supported))) for v in gs.VERSIONS],
-          f'runtime/game_versions.h {hv} == game_sites.VERSIONS')
+    hv = re.findall(r'X\("([^"]*)", "([0-9a-f]*)", ([01]), \d+, "([0-9a-f]*)", ([01])\)', h)  # (the RomFS file count
+    check(hv == [(v.name, v.build_id, str(int(v.supported)), v.title_id, str(int(v.generic))) for v in gs.VERSIONS],
+          f'runtime/game_versions.h {hv} == game_sites.VERSIONS')  # is the setup's alone)
+    for v in gs.VERSIONS:  # (a version with no build id is told by its title id; one with a build id by that)
+        check(v.build_id or v.title_id, f'{v.name}: has a build id or a title id')
+        check(not v.title_id or re.fullmatch(r'[0-9a-f]{16}', v.title_id), f'{v.name}: title id is 16 lowercase hex digits')
     names = {s.name for s in gs.SITES}
     check(len(names) == len(gs.SITES), 'site names are unique')
     rt = re.findall(r'X\((\w+)\)', open(os.path.join(ROOT, 'runtime', 'game_sites.h'), encoding='utf-8').read())
     check(rt and set(rt) <= names, f'the runtime\'s sites are in SITES: {set(rt) - names}')
     check(set(patches.PATCHES) <= names, f'tools/patches.py\'s sites are in SITES: {set(patches.PATCHES) - names}')
     for v in gs.VERSIONS:
-        if v.supported:
+        if v.supported and not v.generic:  # (a generic game has no sites: nothing to list)
             check(set(gs.KNOWN.get(v.name, {})) == names, f'{v.name}: KNOWN lists every site')
+        if v.generic:
+            check(v.name not in gs.KNOWN, f'{v.name}: a generic game has no KNOWN table')
     check(all(gs.compile_pattern(p) for s in gs.SITES if s.pattern
               for p in ([q for q, _ in s.pattern] if isinstance(s.pattern, list) else [s.pattern])),
           'every pattern compiles')
@@ -160,6 +165,57 @@ def main():
         check(False, 'an unknown main module is refused')
     except gs.SiteError as e:
         check('not a version Savage Wind knows' in str(e), str(e))
+
+    # ---- a generic game (Xenoblade Chronicles 3), told by the title id of its main.npdm
+    xc3 = 'XC3 1.0.0'
+    tid = '010074f013262000'
+    unknown = 'ab' * 32  # (a main build id no version lists)
+    check(gs.supported_version(unknown, tid) and gs.supported_version(unknown, tid).name == xc3, 'XC3 by its title id')
+    check(gs.supported_version(unknown, tid.upper()).name == xc3, 'the title id is compared without case')
+    check(gs.supported_version(unknown, '01007ef00011e000') is None, 'another title id: not known')
+    check(gs.supported_version(unknown, None) is None and gs.supported_version(unknown) is None, 'no npdm: not known')
+    check(gs.supported_version('de0b6ac4efc1dda7' + '0' * 48, tid).name == '1.8.2', 'a build id wins over a title id')
+    logs = []
+    fake = SimpleNamespace(build_id=unknown, image=b'', text=(0, 0), data=(0, 0), size=0)
+    check(gs.for_module(fake, BASE, False, logs.append, tid) == (xc3, {}) and logs, 'generic: no sites, and it says so')
+    try:
+        gs.for_module(fake, BASE)  # (the same main module without its npdm)
+        check(False, 'a main module that only the title id knows needs the npdm')
+    except gs.SiteError as e:
+        check('not a version Savage Wind knows' in str(e), str(e))
+    try:
+        gs.for_module(fake, BASE, False, None, '0100000000000000')
+        check(False, 'another title id is refused')
+    except gs.SiteError as e:
+        check('title id 0100000000000000' in str(e), str(e))
+
+    # ---- program_id(): main.npdm as boot() in runtime/main.c reads it
+    from nso import program_id
+    import tempfile
+
+    def npdm(pid, aci=0x80, magic=b'META', aci_magic=b'ACI0', size=0x200):
+        raw = bytearray(size)
+        raw[:4] = magic
+        struct.pack_into('<I', raw, 0x70, aci)
+        raw[aci:aci + 4] = aci_magic
+        if aci + 0x18 <= size:  # (else the file ends inside the ACI0 header, which is what that case tests)
+            struct.pack_into('<Q', raw, aci + 0x10, pid)
+        return bytes(raw)
+
+    with tempfile.TemporaryDirectory() as d:
+        def pid_of(data):
+            p = os.path.join(d, 'main.npdm')
+            with open(p, 'wb') as f:
+                f.write(data)
+            return program_id(p)
+        check(pid_of(npdm(0x010074F013262000)) == tid, 'program_id: XC3\'s')
+        check(pid_of(npdm(0x01007EF00011E000)) == '01007ef00011e000', 'program_id: BOTW\'s')
+        check(pid_of(npdm(0x1, aci=0x100)) == '0000000000000001', 'program_id: padded to 16 digits, ACI0 elsewhere')
+        check(pid_of(npdm(1, magic=b'XXXX')) is None, 'program_id: not a META file')
+        check(pid_of(npdm(1, aci_magic=b'XXXX')) is None, 'program_id: no ACI0')
+        check(pid_of(npdm(1, aci=0x1f0)) is None, 'program_id: ACI0 past the end')
+        check(pid_of(b'META') is None, 'program_id: too short')
+        check(program_id(os.path.join(d, 'nothing.npdm')) is None, 'program_id: no file')
     print(f'ok: {checks} checks')
 
 

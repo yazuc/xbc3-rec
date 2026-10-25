@@ -25,6 +25,7 @@ extern "C" bool vk_imgui_backend_init(void);  // runtime/nvn/vulkan/imgui_glue.c
 #endif
 
 extern "C" {
+#include "../game_sites.h"
 #include "../hle.h"
 #include "../settings.h"
 #include "../window_size.h"
@@ -154,9 +155,11 @@ extern "C" bool menu_input_captured(void) { return capturing() || game_options_i
 // In game the settings are the game's own Options screen (game_options.mm): F1, Esc and the controller's home button no
 // longer open this menu (SAVAGEWIND_OVERLAY=1 brings it back). Esc frees the mouse cursor instead, a click in the
 // window holds it again (runtime/hle/input.c).
+// A game that isn't Breath of the Wild (g_game_generic) has no such Options screen, so this menu stays the way to
+// reach the settings there.
 static bool overlay_enabled(void) {
     static const bool on = getenv("SAVAGEWIND_OVERLAY") && *getenv("SAVAGEWIND_OVERLAY") != '0';
-    return on;
+    return on || g_game_generic;
 }
 static std::atomic<bool> g_cursor_free{false};
 extern "C" bool menu_cursor_free(void) { return g_cursor_free.load(); }

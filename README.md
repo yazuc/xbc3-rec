@@ -77,6 +77,28 @@ extracted/
 The `main` module's build id tells the exact version; `python tools/sw_probe.py` (it reads `extracted/exefs`)
 prints it and what the recompiler will find there.
 
+### Xenoblade Chronicles 3 1.0.0 (experimental)
+
+The setup also accepts the extracted files of *Xenoblade Chronicles 3* **1.0.0** (title id `010074F013262000`), in the
+same layout and from your own copy, as above:
+
+```
+extracted/
+  exefs/   main, main.npdm, sdk, subsdk0, ... (whatever the game's ExeFS has)
+  romfs/   the complete RomFS
+```
+
+- The game is recognised by the program id in `exefs/main.npdm`, not by a `main` build id, and its RomFS is accepted
+  without BOTW's `System/Version.txt` check. `python tools/sw_probe.py extracted/exefs` prints the title id and the
+  `main` build id; to accept only that exact build, put the build id on the `XC3 1.0.0` line of `VERSIONS` in
+  `tools/game_sites.py` and in `runtime/game_versions.h`.
+- It is built as a *generic* game: the whole game code is recompiled and the SDK is replaced by the runtime's HLE as
+  for BOTW, but nothing that is specific to Breath of the Wild is applied (its Options and title screen pages, the
+  frame-rate clock, pause detection). Savage Wind's own menu stays available in game with F1 / Esc.
+- **Nobody has run it yet.** What is done is the part that accepts the files, builds the game code and loads it;
+  whether the game then boots, draws and plays is not known. Expect failures in boot, services or graphics, and
+  report what you find.
+
 ## Status
 
 Estimates of where each part stands. "Tested in game" is how much of the game has been played through on Savage Wind so far.

@@ -1,7 +1,6 @@
 """NSO loader: decompress segments, build the memory image, parse MOD0/dynamic info."""
 import struct
 import sys
-import lz4.block
 
 DT_NULL, DT_NEEDED, DT_PLTRELSZ, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_RELA, DT_RELASZ = 0, 1, 2, 4, 5, 6, 7, 8
 DT_STRSZ, DT_JMPREL, DT_RELRSZ, DT_RELR, DT_RELACOUNT, DT_GNU_HASH = 10, 23, 35, 36, 0x6FFFFFF9, 0x6FFFFEF5
@@ -18,6 +17,23 @@ def header(path):
             'build_id': raw[0x40:0x60].hex()}
 
 
+def program_id(npdm_path):
+    """The program (title) id in an exefs's main.npdm, as 16 lowercase hex digits; None if there is no usable npdm.
+    The same read as boot() in runtime/main.c: "META" at 0, the ACI0 offset at +0x70, the program id at ACI0 +0x10.
+    It tells games apart where their main modules' build ids are not known (tools/game_sites.py VERSIONS)."""
+    try:
+        with open(npdm_path, 'rb') as f:
+            raw = f.read(0x10000)
+    except OSError:
+        return None
+    if len(raw) < 0x80 or raw[:4] != b'META':
+        return None
+    aci = struct.unpack_from('<I', raw, 0x70)[0]
+    if aci + 0x18 > len(raw) or raw[aci:aci + 4] != b'ACI0':
+        return None
+    return f'{struct.unpack_from("<Q", raw, aci + 0x10)[0]:016x}'
+
+
 class Nso:
     def __init__(self, path):
         raw = open(path, 'rb').read()
@@ -30,6 +46,7 @@ class Nso:
             comp_size = struct.unpack_from('<I', raw, 0x60 + i * 4)[0]
             data = raw[file_off:file_off + comp_size]
             if flags & (1 << i):
+                import lz4.block  # (here, not at the top: header() and program_id() need no LZ4)
                 data = lz4.block.decompress(data, uncompressed_size=dec_size)
             segs.append((mem_off, data))
         self.bss_size = struct.unpack_from('<I', raw, 0x3C)[0]

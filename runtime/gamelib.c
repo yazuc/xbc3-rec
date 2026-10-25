@@ -73,9 +73,13 @@ const char *gamelib_cpu_problem(void) {
 
 GameSites g_site;
 const char *g_game_version = "";
+bool g_game_generic = false;
 
 // g_site from the library's sites: every one runtime/game_sites.h names has to be there (the library and this build
 // come from the same tools/game_sites.py, or their GAMELIB_IDs would differ).
+// A library with a version name and no sites at all is a generic game (tools/game_sites.py Version.generic: not
+// Breath of the Wild): g_site stays zero, and everything that reads it checks for that (g_game_generic). One with no
+// version name and no sites (--no-sites, tools/test_layout.py's made-up modules) is still refused.
 static bool take_sites(const GameLibTables *t) {
     static const struct {
         const char *name;
@@ -85,6 +89,13 @@ static bool take_sites(const GameLibTables *t) {
         GAME_SITES(GAME_SITE_ENTRY)
 #undef GAME_SITE_ENTRY
     };
+    g_game_generic = false;
+    if (*t->nsites == 0 && t->version && *t->version) {
+        memset(&g_site, 0, sizeof g_site);
+        g_game_version = t->version;
+        g_game_generic = true;
+        return true;
+    }
     for (size_t i = 0; i < sizeof want / sizeof want[0]; i++) {
         uint32_t k = 0;
         while (k < *t->nsites && strcmp(t->sites[k].name, want[i].name)) k++;

@@ -1073,7 +1073,7 @@ NVN(nvnWindowGetPresentInterval) { RET(WIN->interval); }
 #define FRAME_LOOP_LR g_site.frame_loop_interval_ret
 NVN(nvnWindowSetPresentInterval) {
     int want = (int)A(1);
-    if (c->x[30] == FRAME_LOOP_LR) {
+    if (FRAME_LOOP_LR && c->x[30] == FRAME_LOOP_LR) {  // (zero: a generic game, g_game_generic, has no BOTW frame loop)
         uint64_t fw = c->x[19];
         static int log_ms = -2, max_iv = -1;
         if (log_ms == -2) { const char *e = getenv("SAVAGEWIND_LOG_FRAMETIME"); log_ms = e ? atoi(e) : -1; }

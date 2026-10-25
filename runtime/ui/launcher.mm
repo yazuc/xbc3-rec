@@ -134,19 +134,47 @@ struct GameVersion {
     const char *name, *id;
     bool supported;
     unsigned romfs_files;  // (0: not counted)
+    const char *title_id;  // (the program id of main.npdm: tells a version whose build id is empty; else "")
+    bool generic;          // (not Breath of the Wild: no System/Version.txt to check, no BOTW sites in the game code)
 };
 static const GameVersion VERSIONS[] = {
-#define GAME_VERSION_ENTRY(v, id, ok, files) {v, id, ok, files},
+#define GAME_VERSION_ENTRY(v, id, ok, files, tid, gen) {v, id, ok, files, tid, gen},
     GAME_VERSIONS(GAME_VERSION_ENTRY)
 #undef GAME_VERSION_ENTRY
 };
-static const GameVersion *main_version(const std::string &id) {
+
+// The program id in an exefs folder's main.npdm as 16 lowercase hex digits, "" when there is no usable one. The same
+// read as boot() in runtime/main.c ("META", the ACI0 offset at +0x70, the program id at ACI0 +0x10) and
+// tools/nso.py program_id.
+static std::string npdm_title_id(const std::string &exefs) {
+    FILE *f = fopen((exefs + "/main.npdm").c_str(), "rb");
+    if (!f) return "";
+    static uint8_t npdm[0x10000];
+    size_t n = fread(npdm, 1, sizeof npdm, f);
+    fclose(f);
+    if (n < 0x80 || memcmp(npdm, "META", 4)) return "";
+    uint32_t aci;
+    memcpy(&aci, npdm + 0x70, 4);
+    if ((uint64_t)aci + 0x18 > n || memcmp(npdm + aci, "ACI0", 4)) return "";
+    uint64_t pid;
+    memcpy(&pid, npdm + aci + 0x10, 8);
+    char b[17];
+    snprintf(b, sizeof b, "%016llx", (unsigned long long)pid);
+    return b;
+}
+
+// The version of a main module: by its build id; else, for a version with no build id, by the title id of the exefs's
+// main.npdm (tools/game_sites.py supported_version is the same).
+static const GameVersion *main_version(const std::string &id, const std::string &title_id) {
     for (const GameVersion &v : VERSIONS)
         if (*v.id && id == v.id) return &v;
+    if (!title_id.empty())
+        for (const GameVersion &v : VERSIONS)
+            if (!*v.id && *v.title_id && title_id == v.title_id) return &v;
     return nullptr;
 }
-static bool supported_main(const std::string &id) {
-    const GameVersion *v = main_version(id);
+static bool supported_main(const std::string &id, const std::string &title_id) {
+    const GameVersion *v = main_version(id, title_id);
     return v && v->supported;
 }
 
@@ -189,6 +217,15 @@ static unsigned count_files(const std::string &dir, unsigned enough, unsigned n 
 // A common mistake used to pass this far and the game then failed with no explanation: the update's ExeFS with the
 // cartridge's RomFS, which says its own older version, or with the update's RomFS alone, which has far fewer files.
 static std::string check_romfs(const std::string &romfs, const GameVersion &v) {
+    if (v.generic) {  // (another game than BOTW: no System/Version.txt; a file count only if the list gives one)
+        unsigned want = (unsigned)(v.romfs_files * ROMFS_FILES_MARGIN);
+        unsigned files = count_files(romfs, want ? want : 1);
+        fprintf(stderr, "[launcher] romfs of %s: %u%s files (wants %u)\n", v.name, files, want ? "+" : "", want);
+        if (!want || files >= want) return "";
+        char msg[400];
+        snprintf(msg, sizeof msg, tr("It has %u files; with the update applied it has %u."), files, v.romfs_files);
+        return msg;
+    }
     char found[64] = "";
     if (FILE *f = fopen((romfs + "/System/Version.txt").c_str(), "rb")) {
         size_t n = fread(found, 1, sizeof found - 1, f);
@@ -220,8 +257,9 @@ static std::string check_copied_files(const std::string &root) {
     if (!file_exists(root + "/exefs/main")) return "No game files";
     std::string id;
     if (!nso_build_id(root + "/exefs/main", &id)) return "Game files unreadable (exefs/main is not an NSO)";
-    if (!supported_main(id)) {
-        const GameVersion *v = main_version(id);
+    const std::string tid = npdm_title_id(root + "/exefs");
+    if (!supported_main(id, tid)) {
+        const GameVersion *v = main_version(id, tid);
         if (v) g_files_version = v->name;
         return v ? NOT_SUPPORTED_YET : NOT_SUPPORTED;
     }
@@ -467,15 +505,16 @@ static void *extract_thread(void *) {
     {
         std::string id;
         if (!nso_build_id(exefs + "/main", &id)) { set_failure(FAIL_VERSION); goto done; }
-        fprintf(stderr, "[launcher] main build id %s\n", id.c_str());
-        if (!supported_main(id)) {  // (before copying 15 GB)
-            const GameVersion *v = main_version(id);
+        const std::string tid = npdm_title_id(exefs);
+        fprintf(stderr, "[launcher] main build id %s, title id %s\n", id.c_str(), tid.empty() ? "(none)" : tid.c_str());
+        if (!supported_main(id, tid)) {  // (before copying 15 GB)
+            const GameVersion *v = main_version(id, tid);
             if (v) g_files_version = v->name;
             set_failure(v ? FAIL_NOT_YET : FAIL_NOT_SUPPORTED);
             goto done;
         }
         set_job("Checking the game files...");
-        const GameVersion *v = main_version(id);
+        const GameVersion *v = main_version(id, tid);
         std::string found = check_romfs(romfs, *v);  // (the RomFS that goes with that ExeFS)
         if (!found.empty()) { set_romfs_failure(*v, found); goto done; }
     }

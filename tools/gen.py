@@ -35,7 +35,7 @@ import layout
 import patches
 from analyze import eh_frame_extents, eh_frame_functions
 from lifter import Insn, Lifter, Unsupported, bits, emit_asm_batch, hx, sext
-from nso import Nso, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE, header
+from nso import Nso, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE, header, program_id
 
 SCRATCH_MEM = 0x7300000000
 
@@ -602,18 +602,21 @@ def discover(m, starts):
     return entries, rounds
 
 
-def main_sites(nso, base, opts):
-    """(version, sites) of a main module (tools/game_sites.py); none with --no-sites"""
+def main_sites(nso, base, opts, path):
+    """(version, sites) of a main module (tools/game_sites.py); none with --no-sites. path: the module's NSO file;
+    the main.npdm next to it gives the title id that tells a game whose main build id isn't pinned (not BOTW:
+    tools/game_sites.py VERSIONS)."""
     if opts.no_sites:
         return '', {}
-    return game_sites.for_module(nso, base, opts.any_version, lambda s: print(s, file=sys.stderr))
+    tid = program_id(os.path.join(os.path.dirname(os.path.abspath(path)), 'main.npdm'))
+    return game_sites.for_module(nso, base, opts.any_version, lambda s: print(s, file=sys.stderr), tid)
 
 
 def generate(name, nso, base, outdir, opts, sites=None):
     t0 = time.time()
     m = Module(name, nso, base, opts.simd)
     if name == 'main':
-        m.sites = sites if sites is not None else main_sites(m.nso, base, opts)[1]
+        m.sites = sites if sites is not None else main_sites(m.nso, base, opts, nso)[1]
         m.patches = patches.table(m.sites) if m.sites else {}
     starts = m.boundaries()
     hle = {}
@@ -713,7 +716,8 @@ def main():
             lay = layout.checked(exefs)
             layout.show(lay)
             main_base = next(b for n, b, *_ in lay if n == 'main')
-            version, sites = main_sites(Nso(os.path.join(exefs, 'main')), main_base, args)
+            main_path = os.path.join(exefs, 'main')
+            version, sites = main_sites(Nso(main_path), main_base, args, main_path)
             print(f'  game version {version}, {len(sites)} sites')
             layout.write(lay, outdir, (version, sites))
             if args.name == 'all':

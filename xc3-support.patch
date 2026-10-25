@@ -1,0 +1,677 @@
+diff --git a/README.md b/README.md
+index 66dc3c9..4bd6b66 100644
+--- a/README.md
++++ b/README.md
+@@ -77,6 +77,28 @@ extracted/
+ The `main` module's build id tells the exact version; `python tools/sw_probe.py` (it reads `extracted/exefs`)
+ prints it and what the recompiler will find there.
+ 
++### Xenoblade Chronicles 3 1.0.0 (experimental)
++
++The setup also accepts the extracted files of *Xenoblade Chronicles 3* **1.0.0** (title id `010074F013262000`), in the
++same layout and from your own copy, as above:
++
++```
++extracted/
++  exefs/   main, main.npdm, sdk, subsdk0, ... (whatever the game's ExeFS has)
++  romfs/   the complete RomFS
++```
++
++- The game is recognised by the program id in `exefs/main.npdm`, not by a `main` build id, and its RomFS is accepted
++  without BOTW's `System/Version.txt` check. `python tools/sw_probe.py extracted/exefs` prints the title id and the
++  `main` build id; to accept only that exact build, put the build id on the `XC3 1.0.0` line of `VERSIONS` in
++  `tools/game_sites.py` and in `runtime/game_versions.h`.
++- It is built as a *generic* game: the whole game code is recompiled and the SDK is replaced by the runtime's HLE as
++  for BOTW, but nothing that is specific to Breath of the Wild is applied (its Options and title screen pages, the
++  frame-rate clock, pause detection). Savage Wind's own menu stays available in game with F1 / Esc.
++- **Nobody has run it yet.** What is done is the part that accepts the files, builds the game code and loads it;
++  whether the game then boots, draws and plays is not known. Expect failures in boot, services or graphics, and
++  report what you find.
++
+ ## Status
+ 
+ Estimates of where each part stands. "Tested in game" is how much of the game has been played through on Savage Wind so far.
+diff --git a/docs/SAVAGE-WIND.md b/docs/SAVAGE-WIND.md
+index f6944ee..f71bb3f 100644
+--- a/docs/SAVAGE-WIND.md
++++ b/docs/SAVAGE-WIND.md
+@@ -1241,6 +1241,27 @@ que depende de la versión son las direcciones del `main` que tocan los parches
+   opciones del juego (14). Cada parche además comprueba la palabra de instrucción que espera y para la generación
+   si no la ve. El modo FP (`FPCR.FZ` en `MXCSR`, `runtime/simd.h`) no tiene direcciones.
+ 
++Juegos que no son BOTW (versión `generic`): Xenoblade Chronicles 3 1.0.0 (title id `010074F013262000`) se acepta sin
++sitios. Sin probar con archivos reales.
++- `VERSIONS` y `game_versions.h` llevan ahora además el title id y la marca `generic`
++  (`X(versión, build id, soportada, ficheros de romfs, title id, generic)`). Una versión con el build id vacío se
++  reconoce solo por el program id del `main.npdm` (`tools/nso.py program_id`, igual que `boot()` en `runtime/main.c`;
++  en el lanzador `npdm_title_id`): cualquier `main` de ese juego. Un build id exacto gana siempre sobre un title id.
++  Para fijar el build id de XC3: `sw_probe.py` lo imprime; ponerlo en las dos listas (y el test comprueba que
++  coincidan).
++- `generic`: `for_module` devuelve `(nombre, {})` sin resolver patrones, `gen.py` no aplica `patches.py` y `layout.c`
++  queda con la versión y 0 sitios. `gamelib.c` lo toma como juego genérico (`g_game_generic`, `g_site` todo en cero);
++  una biblioteca sin sitios y sin nombre de versión (`--no-sites`) se sigue rechazando.
++- Todo lo que lee una dirección de `g_site` lo comprueba: `framepace.c` (menús, eventos, paso del mando, reloj),
++  `services/fs.c` (`Ver.%s`), `nvn/objects.c` (el bucle de frames) y `game_options.mm` (`rt_title_menu_prepare`). Los
++  `rt_opt_*` solo los llaman los parches de BOTW, que en un juego genérico no existen. El menú de superposición
++  (F1 / Esc) queda activo (`menu.mm`, `overlay_enabled`): no hay pantalla de Opciones del juego donde llegar a los
++  ajustes.
++- El lanzador no pide `System/Version.txt` y no cuenta ficheros si `romfs_files` es 0 (`check_romfs`).
++- Lo que sigue siendo de BOTW y no se ha revisado para otro juego: los idiomas (`language.c`, `Pack/Bootup_*.pack`,
++  `Voice/`), el RSTB de `services/fs.c` (se ignora si el archivo no existe), el escaneo de shaders de
++  `nvn/shader_archive.c` y los HLE de `runtime/hle/`.
++
+ Pasos para una versión nueva (así se hizo la 1.9.0):
+ 
+ 1. Extraer su exefs y romfs (romfs con la actualización fusionada) y correr
+diff --git a/runtime/game_sites.h b/runtime/game_sites.h
+index 4a13153..091afca 100644
+--- a/runtime/game_sites.h
++++ b/runtime/game_sites.h
+@@ -2,6 +2,7 @@
+ // tools/game_sites.py finds them for the version the game code was generated from, and the game library carries them
+ // (runtime/gamelib.h, the generated layout.c). g_site holds them once the library is loaded (gamelib_load).
+ #pragma once
++#include <stdbool.h>
+ #include <stdint.h>
+ 
+ // name (as in tools/game_sites.py) and what is there
+@@ -34,6 +35,10 @@ extern "C" {
+ extern GameSites g_site;
+ // The game version the loaded game code is for ("1.8.2"; "" before gamelib_load).
+ extern const char *g_game_version;
++// True when the game code is for a game that isn't Breath of the Wild (tools/game_sites.py Version.generic): it has no
++// sites, g_site is all zero and none of BOTW's hooks (Options screen, frame loop, pause state...) exist. Whatever reads
++// a g_site address has to check for that first.
++extern bool g_game_generic;
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/runtime/game_versions.h b/runtime/game_versions.h
+index 7226b8b..15b3b2f 100644
+--- a/runtime/game_versions.h
++++ b/runtime/game_versions.h
+@@ -2,13 +2,18 @@
+ // tools/sw_probe.py prints it). The configuration screen sets up the supported ones; a known one that isn't supported
+ // yet is refused with its own message. tools/game_sites.py VERSIONS is the same list for the code generator
+ // (tools/test_game_sites.py checks they match); docs/SAVAGE-WIND.md, "Versiones del juego", has the steps for a
+-// new version. X(version, build id, supported, RomFS files)
++// new version. X(version, build id, supported, RomFS files, title id, generic)
+ // RomFS files: how many its RomFS has with the update applied over the base game (0: not counted). Before copying, the
+ // setup checks that the chosen RomFS says this version in System/Version.txt and has at least 95% of these files: the
+ // cartridge's RomFS without the update says its own version, the update's RomFS alone has far fewer files
+ // (runtime/ui/launcher.mm, check_romfs).
++// title id: the program id in exefs/main.npdm (16 lowercase hex digits). A version with an empty build id is told by it
++// alone: any main module of that title (tools/game_sites.py VERSIONS has the same). Others: "".
++// generic: 1 = not Breath of the Wild. Its RomFS has no System/Version.txt to check (only that it isn't empty, and the
++// file count when one is given) and the game code has no BOTW sites (runtime/gamelib.c).
+ #pragma once
+ 
+-#define GAME_VERSIONS(X)                     \
+-    X("1.8.2", "de0b6ac4efc1dda7", 1, 41056) \
+-    X("1.9.0", "cd57b23fa4bbad65", 1, 41062)
++#define GAME_VERSIONS(X)                           \
++    X("1.8.2", "de0b6ac4efc1dda7", 1, 41056, "", 0) \
++    X("1.9.0", "cd57b23fa4bbad65", 1, 41062, "", 0) \
++    X("XC3 1.0.0", "", 1, 0, "010074f013262000", 1)
+diff --git a/runtime/gamelib.c b/runtime/gamelib.c
+index a20037d..0292066 100644
+--- a/runtime/gamelib.c
++++ b/runtime/gamelib.c
+@@ -73,9 +73,13 @@ const char *gamelib_cpu_problem(void) {
+ 
+ GameSites g_site;
+ const char *g_game_version = "";
++bool g_game_generic = false;
+ 
+ // g_site from the library's sites: every one runtime/game_sites.h names has to be there (the library and this build
+ // come from the same tools/game_sites.py, or their GAMELIB_IDs would differ).
++// A library with a version name and no sites at all is a generic game (tools/game_sites.py Version.generic: not
++// Breath of the Wild): g_site stays zero, and everything that reads it checks for that (g_game_generic). One with no
++// version name and no sites (--no-sites, tools/test_layout.py's made-up modules) is still refused.
+ static bool take_sites(const GameLibTables *t) {
+     static const struct {
+         const char *name;
+@@ -85,6 +89,13 @@ static bool take_sites(const GameLibTables *t) {
+         GAME_SITES(GAME_SITE_ENTRY)
+ #undef GAME_SITE_ENTRY
+     };
++    g_game_generic = false;
++    if (*t->nsites == 0 && t->version && *t->version) {
++        memset(&g_site, 0, sizeof g_site);
++        g_game_version = t->version;
++        g_game_generic = true;
++        return true;
++    }
+     for (size_t i = 0; i < sizeof want / sizeof want[0]; i++) {
+         uint32_t k = 0;
+         while (k < *t->nsites && strcmp(t->sites[k].name, want[i].name)) k++;
+diff --git a/runtime/hle/framepace.c b/runtime/hle/framepace.c
+index 4f80d0e..1781bff 100644
+--- a/runtime/hle/framepace.c
++++ b/runtime/hle/framepace.c
+@@ -71,6 +71,7 @@ bool framepace_on(void) {
+ // The menus: the game is paused (pause menu, map), or the title screen's menu is up (screen 1 in the UI screen
+ // manager [screen_mgr]: +0x28 count, +0x30 screens by id).
+ static bool in_menu(void) {
++    if (!PAUSE_STATE || !g_site.screen_mgr) return false;  // (a generic game, g_game_generic: no BOTW menus to tell)
+     if (*(uint32_t *)(uintptr_t)PAUSE_STATE) return true;
+     uint64_t mgr = *(uint64_t *)(uintptr_t)g_site.screen_mgr;
+     return mgr && VF(uint32_t, mgr, 0x28) > 1 && VF(uint64_t, mgr, 0x30) &&
+@@ -81,6 +82,7 @@ static bool in_menu(void) {
+ // +0x1d2b8, as hasActiveEvent, 1.8.2 0x7000ffa208, reads it; the time of day stands still meanwhile). Some of their
+ // waits count frames: the new game's opening gave Link control 2 s early at 60 fps, 3 s at 120.
+ static bool in_event(void) {
++    if (!g_site.event_mgr) return false;  // (a generic game: no BOTW event manager)
+     uint64_t evt = *(uint64_t *)(uintptr_t)g_site.event_mgr;
+     return evt && *(uint64_t *)(uintptr_t)(evt + 0x1d2b8);
+ }
+@@ -161,7 +163,7 @@ void framepace_presented(uint64_t t, bool on_grid) {
+     g_grid_streak = on_grid ? g_grid_streak + 1 : 0;
+     static int fixed = -1;
+     if (fixed < 0) fixed = env_int("SAVAGEWIND_NO_CONTROLLER_STEP", 0);
+-    if (!fixed) *(float *)(uintptr_t)CONTROLLER_STEP = g_step;
++    if (!fixed && CONTROLLER_STEP) *(float *)(uintptr_t)CONTROLLER_STEP = g_step;  // (zero: a generic game)
+ }
+ 
+ // The menus' speed: every frame the game sets a GUI speed to its integer interval x 0.5: 1 at 30 fps, 0.5 at 60, and
+@@ -194,6 +196,7 @@ void rt_vfr_update(uint64_t vfr) {
+     clock_probe(vfr);
+     log_screens();
+     if (!framepace_on()) return;
++    if (!PAUSE_STATE) return;  // (a generic game, g_game_generic: the BOTW clock isn't there to set)
+     static uint64_t last_t;
+     static double real, given;  // seconds of real time and of game time handed out (only their gap matters)
+     static double smooth;       // seconds between updates, averaged over about 20
+@@ -310,6 +313,7 @@ static void clock_probe(uint64_t vfr) {
+     if (now < next) return;
+     next += (uint64_t)every * 1000000ull;
+     if (next < now) next = now + (uint64_t)every * 1000000ull;
++    if (!g_site.world_mgr || !g_site.player_info) return;  // (a generic game: nothing of BOTW's to read)
+     float tod = -1, pos[3] = {0, 0, 0}, stamina = -1;
+     uint64_t wm = *(uint64_t *)(uintptr_t)g_site.world_mgr;
+     if (wm && VF(uint32_t, wm, 0x5c0)) {
+@@ -331,7 +335,7 @@ static void log_screens(void) {
+     static int on = -1;
+     static char last[1024];
+     if (on < 0) on = env_int("SAVAGEWIND_LOG_SCREENS", 0);
+-    if (!on) return;
++    if (!on || !g_site.screen_mgr || !PAUSE_STATE) return;  // (a generic game: no BOTW screens)
+     uint64_t mgr = *(uint64_t *)(uintptr_t)g_site.screen_mgr;
+     if (!mgr) return;
+     uint32_t n = VF(uint32_t, mgr, 0x28);
+diff --git a/runtime/nvn/objects.c b/runtime/nvn/objects.c
+index f068db0..00eecab 100644
+--- a/runtime/nvn/objects.c
++++ b/runtime/nvn/objects.c
+@@ -1073,7 +1073,7 @@ NVN(nvnWindowGetPresentInterval) { RET(WIN->interval); }
+ #define FRAME_LOOP_LR g_site.frame_loop_interval_ret
+ NVN(nvnWindowSetPresentInterval) {
+     int want = (int)A(1);
+-    if (c->x[30] == FRAME_LOOP_LR) {
++    if (FRAME_LOOP_LR && c->x[30] == FRAME_LOOP_LR) {  // (zero: a generic game, g_game_generic, has no BOTW frame loop)
+         uint64_t fw = c->x[19];
+         static int log_ms = -2, max_iv = -1;
+         if (log_ms == -2) { const char *e = getenv("SAVAGEWIND_LOG_FRAMETIME"); log_ms = e ? atoi(e) : -1; }
+diff --git a/runtime/services/fs.c b/runtime/services/fs.c
+index 66f9172..fa47759 100644
+--- a/runtime/services/fs.c
++++ b/runtime/services/fs.c
+@@ -491,6 +491,7 @@ static void rom_index(int fd) {
+ // 0x71014b854e in the Ghidra project, read by FUN_7100d4b57c and FUN_7100d4bca0); "%s" leaves just "Savage Wind
+ // <version>". Called once main is loaded; anything else at that address is left alone.
+ void fs_title_version_patch(void) {
++    if (!g_site.title_version_format) return;  // (a generic game, g_game_generic: no BOTW title screen to patch)
+     char *fmt = (char *)(uintptr_t)g_site.title_version_format;
+     if (memcmp(fmt, "Ver.%s", 7)) { LOG("[fs] title version: \"Ver.%%s\" not found, left as is\n"); return; }
+     memcpy(fmt, "%s", 3);
+diff --git a/runtime/ui/game_options.mm b/runtime/ui/game_options.mm
+index b63ee52..c770e60 100644
+--- a/runtime/ui/game_options.mm
++++ b/runtime/ui/game_options.mm
+@@ -798,6 +798,7 @@ extern "C" void rt_opt_back(void) {
+ const uint32_t TITLE_DLC_BUTTON = 0x6d;
+ 
+ extern "C" void rt_title_menu_prepare(void) {
++    if (g_game_generic) return;  // (not BOTW: no title menu button lists to trim)
+     int n = 0;
+     for (uint64_t p = g_site.main_data; p + 0x10 <= g_site.main_end; p += 8) {
+         uint32_t count = rd32(p);
+diff --git a/runtime/ui/launcher.mm b/runtime/ui/launcher.mm
+index a63633e..301f853 100644
+--- a/runtime/ui/launcher.mm
++++ b/runtime/ui/launcher.mm
+@@ -134,19 +134,47 @@ struct GameVersion {
+     const char *name, *id;
+     bool supported;
+     unsigned romfs_files;  // (0: not counted)
++    const char *title_id;  // (the program id of main.npdm: tells a version whose build id is empty; else "")
++    bool generic;          // (not Breath of the Wild: no System/Version.txt to check, no BOTW sites in the game code)
+ };
+ static const GameVersion VERSIONS[] = {
+-#define GAME_VERSION_ENTRY(v, id, ok, files) {v, id, ok, files},
++#define GAME_VERSION_ENTRY(v, id, ok, files, tid, gen) {v, id, ok, files, tid, gen},
+     GAME_VERSIONS(GAME_VERSION_ENTRY)
+ #undef GAME_VERSION_ENTRY
+ };
+-static const GameVersion *main_version(const std::string &id) {
++
++// The program id in an exefs folder's main.npdm as 16 lowercase hex digits, "" when there is no usable one. The same
++// read as boot() in runtime/main.c ("META", the ACI0 offset at +0x70, the program id at ACI0 +0x10) and
++// tools/nso.py program_id.
++static std::string npdm_title_id(const std::string &exefs) {
++    FILE *f = fopen((exefs + "/main.npdm").c_str(), "rb");
++    if (!f) return "";
++    static uint8_t npdm[0x10000];
++    size_t n = fread(npdm, 1, sizeof npdm, f);
++    fclose(f);
++    if (n < 0x80 || memcmp(npdm, "META", 4)) return "";
++    uint32_t aci;
++    memcpy(&aci, npdm + 0x70, 4);
++    if ((uint64_t)aci + 0x18 > n || memcmp(npdm + aci, "ACI0", 4)) return "";
++    uint64_t pid;
++    memcpy(&pid, npdm + aci + 0x10, 8);
++    char b[17];
++    snprintf(b, sizeof b, "%016llx", (unsigned long long)pid);
++    return b;
++}
++
++// The version of a main module: by its build id; else, for a version with no build id, by the title id of the exefs's
++// main.npdm (tools/game_sites.py supported_version is the same).
++static const GameVersion *main_version(const std::string &id, const std::string &title_id) {
+     for (const GameVersion &v : VERSIONS)
+         if (*v.id && id == v.id) return &v;
++    if (!title_id.empty())
++        for (const GameVersion &v : VERSIONS)
++            if (!*v.id && *v.title_id && title_id == v.title_id) return &v;
+     return nullptr;
+ }
+-static bool supported_main(const std::string &id) {
+-    const GameVersion *v = main_version(id);
++static bool supported_main(const std::string &id, const std::string &title_id) {
++    const GameVersion *v = main_version(id, title_id);
+     return v && v->supported;
+ }
+ 
+@@ -189,6 +217,15 @@ static unsigned count_files(const std::string &dir, unsigned enough, unsigned n
+ // A common mistake used to pass this far and the game then failed with no explanation: the update's ExeFS with the
+ // cartridge's RomFS, which says its own older version, or with the update's RomFS alone, which has far fewer files.
+ static std::string check_romfs(const std::string &romfs, const GameVersion &v) {
++    if (v.generic) {  // (another game than BOTW: no System/Version.txt; a file count only if the list gives one)
++        unsigned want = (unsigned)(v.romfs_files * ROMFS_FILES_MARGIN);
++        unsigned files = count_files(romfs, want ? want : 1);
++        fprintf(stderr, "[launcher] romfs of %s: %u%s files (wants %u)\n", v.name, files, want ? "+" : "", want);
++        if (!want || files >= want) return "";
++        char msg[400];
++        snprintf(msg, sizeof msg, tr("It has %u files; with the update applied it has %u."), files, v.romfs_files);
++        return msg;
++    }
+     char found[64] = "";
+     if (FILE *f = fopen((romfs + "/System/Version.txt").c_str(), "rb")) {
+         size_t n = fread(found, 1, sizeof found - 1, f);
+@@ -220,8 +257,9 @@ static std::string check_copied_files(const std::string &root) {
+     if (!file_exists(root + "/exefs/main")) return "No game files";
+     std::string id;
+     if (!nso_build_id(root + "/exefs/main", &id)) return "Game files unreadable (exefs/main is not an NSO)";
+-    if (!supported_main(id)) {
+-        const GameVersion *v = main_version(id);
++    const std::string tid = npdm_title_id(root + "/exefs");
++    if (!supported_main(id, tid)) {
++        const GameVersion *v = main_version(id, tid);
+         if (v) g_files_version = v->name;
+         return v ? NOT_SUPPORTED_YET : NOT_SUPPORTED;
+     }
+@@ -467,15 +505,16 @@ static void *extract_thread(void *) {
+     {
+         std::string id;
+         if (!nso_build_id(exefs + "/main", &id)) { set_failure(FAIL_VERSION); goto done; }
+-        fprintf(stderr, "[launcher] main build id %s\n", id.c_str());
+-        if (!supported_main(id)) {  // (before copying 15 GB)
+-            const GameVersion *v = main_version(id);
++        const std::string tid = npdm_title_id(exefs);
++        fprintf(stderr, "[launcher] main build id %s, title id %s\n", id.c_str(), tid.empty() ? "(none)" : tid.c_str());
++        if (!supported_main(id, tid)) {  // (before copying 15 GB)
++            const GameVersion *v = main_version(id, tid);
+             if (v) g_files_version = v->name;
+             set_failure(v ? FAIL_NOT_YET : FAIL_NOT_SUPPORTED);
+             goto done;
+         }
+         set_job("Checking the game files...");
+-        const GameVersion *v = main_version(id);
++        const GameVersion *v = main_version(id, tid);
+         std::string found = check_romfs(romfs, *v);  // (the RomFS that goes with that ExeFS)
+         if (!found.empty()) { set_romfs_failure(*v, found); goto done; }
+     }
+diff --git a/runtime/ui/menu.mm b/runtime/ui/menu.mm
+index 78efae4..14db648 100644
+--- a/runtime/ui/menu.mm
++++ b/runtime/ui/menu.mm
+@@ -25,6 +25,7 @@ extern "C" bool vk_imgui_backend_init(void);  // runtime/nvn/vulkan/imgui_glue.c
+ #endif
+ 
+ extern "C" {
++#include "../game_sites.h"
+ #include "../hle.h"
+ #include "../settings.h"
+ #include "../window_size.h"
+@@ -154,9 +155,11 @@ extern "C" bool menu_input_captured(void) { return capturing() || game_options_i
+ // In game the settings are the game's own Options screen (game_options.mm): F1, Esc and the controller's home button no
+ // longer open this menu (SAVAGEWIND_OVERLAY=1 brings it back). Esc frees the mouse cursor instead, a click in the
+ // window holds it again (runtime/hle/input.c).
++// A game that isn't Breath of the Wild (g_game_generic) has no such Options screen, so this menu stays the way to
++// reach the settings there.
+ static bool overlay_enabled(void) {
+     static const bool on = getenv("SAVAGEWIND_OVERLAY") && *getenv("SAVAGEWIND_OVERLAY") != '0';
+-    return on;
++    return on || g_game_generic;
+ }
+ static std::atomic<bool> g_cursor_free{false};
+ extern "C" bool menu_cursor_free(void) { return g_cursor_free.load(); }
+diff --git a/tools/game_sites.py b/tools/game_sites.py
+index b396012..2db2981 100644
+--- a/tools/game_sites.py
++++ b/tools/game_sites.py
+@@ -40,12 +40,24 @@ from collections import namedtuple
+ 
+ MAIN_BASE = 0x7000000000  # (tools/layout.py: main is the first module)
+ 
+-# name, version, main module build id (the first 8 bytes; tools/sw_probe.py prints it), supported. One that isn't
+-# supported yet is known but refused by the setup until its sites are checked.
+-Version = namedtuple('Version', 'name build_id supported')
++# name, main module build id (the first 8 bytes; tools/sw_probe.py prints it), supported, title id, generic. One that
++# isn't supported yet is known but refused by the setup until its sites are checked.
++#
++# title id: the program id in exefs/main.npdm (16 lowercase hex digits; tools/nso.py program_id). A version with an
++#   empty build id is told by it alone: any main module of that title matches (its build id isn't pinned yet; paste the
++#   one `sw_probe.py` prints to pin it, and that version then matches that build only). Versions with a build id are
++#   told by it, as before (title id '').
++# generic: the game isn't Breath of the Wild. None of BOTW's sites (SITES below: its Options and title screens, pause
++#   state, frame loop...) exist in it, so the code is generated without sites or patches: the whole game is recompiled
++#   and the SDK is replaced by its HLE as for any game, and nothing of BOTW's is hooked (runtime/gamelib.c: a game
++#   library with a version name and no sites is generic).
++Version = namedtuple('Version', 'name build_id supported title_id generic', defaults=('', False))
+ VERSIONS = [
+     Version('1.8.2', 'de0b6ac4efc1dda7', True),
+     Version('1.9.0', 'cd57b23fa4bbad65', True),  # (2026-02-17: Thai text on Switch 2; SDK 21.4.1)
++    # Xenoblade Chronicles 3 1.0.0 (title id 010074F013262000). The main build id isn't pinned: the files it was
++    # first set up from were not available to read it from.
++    Version('XC3 1.0.0', '', True, '010074f013262000', True),
+ ]
+ 
+ Site = namedtuple('Site', 'name kind pattern at')
+@@ -217,11 +229,16 @@ class SiteError(Exception):
+     pass
+ 
+ 
+-def supported_version(build_id):
+-    """The VERSIONS entry of a main module build id (64 hex digits or the first 16), or None."""
++def supported_version(build_id, title_id=None):
++    """The VERSIONS entry of a main module: by its build id (64 hex digits or the first 16); else, for a version
++    whose build id isn't pinned, by the title id of its main.npdm (16 hex digits, or None: no npdm); else None."""
+     for v in VERSIONS:
+         if v.build_id and build_id[:16] == v.build_id:
+             return v
++    if title_id:
++        for v in VERSIONS:
++            if not v.build_id and v.title_id and title_id.lower() == v.title_id:
++                return v
+     return None
+ 
+ 
+@@ -464,14 +481,23 @@ def resolve(main, known=None, log=None):
+     return out
+ 
+ 
+-def for_module(nso, base, allow_unsupported=False, log=None):
++def for_module(nso, base, allow_unsupported=False, log=None, title_id=None):
+     """(version name, sites) for the main module nso at base. Refuses a build that VERSIONS doesn't support, unless
+-    allow_unsupported (bringing up a new version: its sites must then all be found by pattern)."""
+-    v = supported_version(nso.build_id)
++    allow_unsupported (bringing up a new version: its sites must then all be found by pattern). title_id: the
++    program id of the exefs's main.npdm, which tells a version whose build id isn't pinned. A generic version
++    (another game than BOTW) has no sites: (its name, {})."""
++    v = supported_version(nso.build_id, title_id)
++    if v and v.supported and v.generic:
++        if log:
++            log(f'game_sites: main module build {nso.build_id[:16]}: {v.name}'
++                + ('' if v.build_id else f' (told by title id {v.title_id}; build id not pinned)')
++                + '; no sites, nothing of Breath of the Wild\'s is hooked')
++        return v.name, {}
+     if not v or not v.supported:
+         what = f'version {v.name}, not supported yet' if v else 'not a version Savage Wind knows'
+         if not allow_unsupported:
+-            raise SiteError(f'main module build {nso.build_id[:16]}: {what}')
++            raise SiteError(f'main module build {nso.build_id[:16]}: {what}'
++                            + (f' (title id {title_id})' if title_id else ''))
+         if log:
+             log(f'game_sites: main module build {nso.build_id[:16]}: {what}; sites by pattern only')
+     name = v.name if v else nso.build_id[:16]
+@@ -481,8 +507,15 @@ def for_module(nso, base, allow_unsupported=False, log=None):
+ def main():
+     if len(sys.argv) < 3 or sys.argv[1] not in ('find', 'pattern', 'common'):
+         sys.exit(__doc__)
+-    from nso import Nso
++    import os
++    from nso import Nso, program_id
+     m = Main(Nso(sys.argv[2]))
++    tid = program_id(os.path.join(os.path.dirname(os.path.abspath(sys.argv[2])), 'main.npdm'))
++    if sys.argv[1] == 'find':
++        gv = supported_version(m.nso.build_id, tid)
++        if gv and gv.generic:
++            print(f'main module build {m.nso.build_id[:16]}: {gv.name} (title id {tid}): a generic game, it has no sites')
++            return
+     if sys.argv[1] == 'common':
+         mb, a, b = Main(Nso(sys.argv[4])), int(sys.argv[3], 16), int(sys.argv[5], 16)
+         kind = sys.argv[6] if len(sys.argv) > 6 else 'code'
+diff --git a/tools/gen.py b/tools/gen.py
+index a6da5e9..bc7c211 100644
+--- a/tools/gen.py
++++ b/tools/gen.py
+@@ -35,7 +35,7 @@ import layout
+ import patches
+ from analyze import eh_frame_extents, eh_frame_functions
+ from lifter import Insn, Lifter, Unsupported, bits, emit_asm_batch, hx, sext
+-from nso import Nso, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE, header
++from nso import Nso, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE, header, program_id
+ 
+ SCRATCH_MEM = 0x7300000000
+ 
+@@ -602,18 +602,21 @@ def discover(m, starts):
+     return entries, rounds
+ 
+ 
+-def main_sites(nso, base, opts):
+-    """(version, sites) of a main module (tools/game_sites.py); none with --no-sites"""
++def main_sites(nso, base, opts, path):
++    """(version, sites) of a main module (tools/game_sites.py); none with --no-sites. path: the module's NSO file;
++    the main.npdm next to it gives the title id that tells a game whose main build id isn't pinned (not BOTW:
++    tools/game_sites.py VERSIONS)."""
+     if opts.no_sites:
+         return '', {}
+-    return game_sites.for_module(nso, base, opts.any_version, lambda s: print(s, file=sys.stderr))
++    tid = program_id(os.path.join(os.path.dirname(os.path.abspath(path)), 'main.npdm'))
++    return game_sites.for_module(nso, base, opts.any_version, lambda s: print(s, file=sys.stderr), tid)
+ 
+ 
+ def generate(name, nso, base, outdir, opts, sites=None):
+     t0 = time.time()
+     m = Module(name, nso, base, opts.simd)
+     if name == 'main':
+-        m.sites = sites if sites is not None else main_sites(m.nso, base, opts)[1]
++        m.sites = sites if sites is not None else main_sites(m.nso, base, opts, nso)[1]
+         m.patches = patches.table(m.sites) if m.sites else {}
+     starts = m.boundaries()
+     hle = {}
+@@ -713,7 +716,8 @@ def main():
+             lay = layout.checked(exefs)
+             layout.show(lay)
+             main_base = next(b for n, b, *_ in lay if n == 'main')
+-            version, sites = main_sites(Nso(os.path.join(exefs, 'main')), main_base, args)
++            main_path = os.path.join(exefs, 'main')
++            version, sites = main_sites(Nso(main_path), main_base, args, main_path)
+             print(f'  game version {version}, {len(sites)} sites')
+             layout.write(lay, outdir, (version, sites))
+             if args.name == 'all':
+diff --git a/tools/nso.py b/tools/nso.py
+index 69fe5c9..7c9bce8 100644
+--- a/tools/nso.py
++++ b/tools/nso.py
+@@ -1,7 +1,6 @@
+ """NSO loader: decompress segments, build the memory image, parse MOD0/dynamic info."""
+ import struct
+ import sys
+-import lz4.block
+ 
+ DT_NULL, DT_NEEDED, DT_PLTRELSZ, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_RELA, DT_RELASZ = 0, 1, 2, 4, 5, 6, 7, 8
+ DT_STRSZ, DT_JMPREL, DT_RELRSZ, DT_RELR, DT_RELACOUNT, DT_GNU_HASH = 10, 23, 35, 36, 0x6FFFFFF9, 0x6FFFFEF5
+@@ -18,6 +17,23 @@ def header(path):
+             'build_id': raw[0x40:0x60].hex()}
+ 
+ 
++def program_id(npdm_path):
++    """The program (title) id in an exefs's main.npdm, as 16 lowercase hex digits; None if there is no usable npdm.
++    The same read as boot() in runtime/main.c: "META" at 0, the ACI0 offset at +0x70, the program id at ACI0 +0x10.
++    It tells games apart where their main modules' build ids are not known (tools/game_sites.py VERSIONS)."""
++    try:
++        with open(npdm_path, 'rb') as f:
++            raw = f.read(0x10000)
++    except OSError:
++        return None
++    if len(raw) < 0x80 or raw[:4] != b'META':
++        return None
++    aci = struct.unpack_from('<I', raw, 0x70)[0]
++    if aci + 0x18 > len(raw) or raw[aci:aci + 4] != b'ACI0':
++        return None
++    return f'{struct.unpack_from("<Q", raw, aci + 0x10)[0]:016x}'
++
++
+ class Nso:
+     def __init__(self, path):
+         raw = open(path, 'rb').read()
+@@ -30,6 +46,7 @@ class Nso:
+             comp_size = struct.unpack_from('<I', raw, 0x60 + i * 4)[0]
+             data = raw[file_off:file_off + comp_size]
+             if flags & (1 << i):
++                import lz4.block  # (here, not at the top: header() and program_id() need no LZ4)
+                 data = lz4.block.decompress(data, uncompressed_size=dec_size)
+             segs.append((mem_off, data))
+         self.bss_size = struct.unpack_from('<I', raw, 0x3C)[0]
+diff --git a/tools/sw_probe.py b/tools/sw_probe.py
+index 0c49c01..fba2ee1 100644
+--- a/tools/sw_probe.py
++++ b/tools/sw_probe.py
+@@ -27,7 +27,7 @@ import game_sites
+ import layout
+ from gen import Module, discover
+ from lifter import Unsupported
+-from nso import Nso, header
++from nso import Nso, header, program_id
+ 
+ TOOLS = os.path.dirname(os.path.abspath(__file__))
+ ROOT = os.path.dirname(TOOLS)
+@@ -163,9 +163,16 @@ def main():
+     print(f'  {"CANNOT LOAD: " + "; ".join(why) if why else "loads"}')
+     version = None
+     if 'main' in bases:  # (tools/game_sites.py VERSIONS)
+-        version = game_sites.supported_version(header(os.path.join(args.exefs, 'main'))['build_id'])
++        main_build = header(os.path.join(args.exefs, 'main'))['build_id']
++        tid = program_id(os.path.join(args.exefs, 'main.npdm'))
++        print(f'  main build id {main_build[:16]}  title id {tid or "(no usable main.npdm)"}')
++        version = game_sites.supported_version(main_build, tid)
+         print('  game version: ' + (f'{version.name}' + ('' if version.supported else ' (not supported yet)')
++                                    + (' (generic: no BOTW sites)' if version.generic else '')
+                                     if version else 'not one Savage Wind knows'))
++        if version and version.generic and not version.build_id:
++            print(f'  build id not pinned: to accept only this build, put "{main_build[:16]}" as the build id of '
++                  f'"{version.name}" in tools/game_sites.py VERSIONS and runtime/game_versions.h')
+     other = [f for f in present if f not in bases and f != 'rtld']
+     if other:
+         print(f'  NOTE: files that are not modules the runtime loads: {other}')
+diff --git a/tools/test_game_sites.py b/tools/test_game_sites.py
+index 840623f..3535761 100644
+--- a/tools/test_game_sites.py
++++ b/tools/test_game_sites.py
+@@ -85,17 +85,22 @@ def image(fn_at, data, got, callee, got_value, filler=0x40):
+ def main():
+     # ---- the lists agree
+     h = open(os.path.join(ROOT, 'runtime', 'game_versions.h'), encoding='utf-8').read()
+-    hv = re.findall(r'X\("([^"]*)", "([0-9a-f]*)", ([01]), \d+\)', h)  # (the RomFS file count is the setup's alone)
+-    check(hv == [(v.name, v.build_id, str(int(v.supported))) for v in gs.VERSIONS],
+-          f'runtime/game_versions.h {hv} == game_sites.VERSIONS')
++    hv = re.findall(r'X\("([^"]*)", "([0-9a-f]*)", ([01]), \d+, "([0-9a-f]*)", ([01])\)', h)  # (the RomFS file count
++    check(hv == [(v.name, v.build_id, str(int(v.supported)), v.title_id, str(int(v.generic))) for v in gs.VERSIONS],
++          f'runtime/game_versions.h {hv} == game_sites.VERSIONS')  # is the setup's alone)
++    for v in gs.VERSIONS:  # (a version with no build id is told by its title id; one with a build id by that)
++        check(v.build_id or v.title_id, f'{v.name}: has a build id or a title id')
++        check(not v.title_id or re.fullmatch(r'[0-9a-f]{16}', v.title_id), f'{v.name}: title id is 16 lowercase hex digits')
+     names = {s.name for s in gs.SITES}
+     check(len(names) == len(gs.SITES), 'site names are unique')
+     rt = re.findall(r'X\((\w+)\)', open(os.path.join(ROOT, 'runtime', 'game_sites.h'), encoding='utf-8').read())
+     check(rt and set(rt) <= names, f'the runtime\'s sites are in SITES: {set(rt) - names}')
+     check(set(patches.PATCHES) <= names, f'tools/patches.py\'s sites are in SITES: {set(patches.PATCHES) - names}')
+     for v in gs.VERSIONS:
+-        if v.supported:
++        if v.supported and not v.generic:  # (a generic game has no sites: nothing to list)
+             check(set(gs.KNOWN.get(v.name, {})) == names, f'{v.name}: KNOWN lists every site')
++        if v.generic:
++            check(v.name not in gs.KNOWN, f'{v.name}: a generic game has no KNOWN table')
+     check(all(gs.compile_pattern(p) for s in gs.SITES if s.pattern
+               for p in ([q for q, _ in s.pattern] if isinstance(s.pattern, list) else [s.pattern])),
+           'every pattern compiles')
+@@ -160,6 +165,57 @@ def main():
+         check(False, 'an unknown main module is refused')
+     except gs.SiteError as e:
+         check('not a version Savage Wind knows' in str(e), str(e))
++
++    # ---- a generic game (Xenoblade Chronicles 3), told by the title id of its main.npdm
++    xc3 = 'XC3 1.0.0'
++    tid = '010074f013262000'
++    unknown = 'ab' * 32  # (a main build id no version lists)
++    check(gs.supported_version(unknown, tid) and gs.supported_version(unknown, tid).name == xc3, 'XC3 by its title id')
++    check(gs.supported_version(unknown, tid.upper()).name == xc3, 'the title id is compared without case')
++    check(gs.supported_version(unknown, '01007ef00011e000') is None, 'another title id: not known')
++    check(gs.supported_version(unknown, None) is None and gs.supported_version(unknown) is None, 'no npdm: not known')
++    check(gs.supported_version('de0b6ac4efc1dda7' + '0' * 48, tid).name == '1.8.2', 'a build id wins over a title id')
++    logs = []
++    fake = SimpleNamespace(build_id=unknown, image=b'', text=(0, 0), data=(0, 0), size=0)
++    check(gs.for_module(fake, BASE, False, logs.append, tid) == (xc3, {}) and logs, 'generic: no sites, and it says so')
++    try:
++        gs.for_module(fake, BASE)  # (the same main module without its npdm)
++        check(False, 'a main module that only the title id knows needs the npdm')
++    except gs.SiteError as e:
++        check('not a version Savage Wind knows' in str(e), str(e))
++    try:
++        gs.for_module(fake, BASE, False, None, '0100000000000000')
++        check(False, 'another title id is refused')
++    except gs.SiteError as e:
++        check('title id 0100000000000000' in str(e), str(e))
++
++    # ---- program_id(): main.npdm as boot() in runtime/main.c reads it
++    from nso import program_id
++    import tempfile
++
++    def npdm(pid, aci=0x80, magic=b'META', aci_magic=b'ACI0', size=0x200):
++        raw = bytearray(size)
++        raw[:4] = magic
++        struct.pack_into('<I', raw, 0x70, aci)
++        raw[aci:aci + 4] = aci_magic
++        if aci + 0x18 <= size:  # (else the file ends inside the ACI0 header, which is what that case tests)
++            struct.pack_into('<Q', raw, aci + 0x10, pid)
++        return bytes(raw)
++
++    with tempfile.TemporaryDirectory() as d:
++        def pid_of(data):
++            p = os.path.join(d, 'main.npdm')
++            with open(p, 'wb') as f:
++                f.write(data)
++            return program_id(p)
++        check(pid_of(npdm(0x010074F013262000)) == tid, 'program_id: XC3\'s')
++        check(pid_of(npdm(0x01007EF00011E000)) == '01007ef00011e000', 'program_id: BOTW\'s')
++        check(pid_of(npdm(0x1, aci=0x100)) == '0000000000000001', 'program_id: padded to 16 digits, ACI0 elsewhere')
++        check(pid_of(npdm(1, magic=b'XXXX')) is None, 'program_id: not a META file')
++        check(pid_of(npdm(1, aci_magic=b'XXXX')) is None, 'program_id: no ACI0')
++        check(pid_of(npdm(1, aci=0x1f0)) is None, 'program_id: ACI0 past the end')
++        check(pid_of(b'META') is None, 'program_id: too short')
++        check(program_id(os.path.join(d, 'nothing.npdm')) is None, 'program_id: no file')
+     print(f'ok: {checks} checks')
+ 
+ 
